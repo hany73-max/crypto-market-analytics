@@ -76,8 +76,9 @@ def get_spark_session(
 
     if "local" in resolved_master:
         builder = (
-            builder.config("spark.driver.host", "localhost")
+            builder.config("spark.driver.host", "127.0.0.1")
             .config("spark.driver.bindAddress", "127.0.0.1")
+            .config("spark.network.timeout", "300s")
             .config("spark.ui.enabled", "false")
         )
 
