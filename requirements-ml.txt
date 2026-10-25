@@ -1,0 +1,19 @@
+# ==============================================================================
+# requirements-ml.txt
+# Dependencies for PySpark MLlib Pipeline, Local Testing, and Data Ingestion
+# ==============================================================================
+
+# Core Spark MLlib runtime pinned to cluster version
+pyspark==3.3.0
+
+# Binance REST client & environment config
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Columnar storage & local parquet I/O
+pyarrow>=14.0.0
+pandas>=2.0.0,<2.3.0
+numpy>=1.24.0,<2.0.0
+
+# Unit and integration testing
+pytest>=7.4.0
