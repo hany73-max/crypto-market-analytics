@@ -1,6 +1,6 @@
 # Cryptocurrency Direction Prediction: Milestone 4 ML Evaluation Report
 
-*Generated on: 2026-10-31 18:01:40 UTC*
+*Generated on: 2026-10-31 18:44:45 UTC*
 
 ## 1. Evaluation Methodology
 
@@ -277,11 +277,11 @@ This evaluation strictly adheres to production-grade quantitative finance standa
 
 ## 9. Plain-English Conclusions Derived from Empirical Data
 
-1. **Statistical Significance**: At shorter horizons, select models (5m logreg, 5m rf, 5m gbt, 15m rf, 15m gbt) demonstrate weak but statistically significant predictive signal where the 95% block-bootstrap AUC CI strictly excludes 0.5000 (e.g., 5m RF: 0.5335 [0.5173, 0.5498]). However, at the 60m horizon, all models (15m logreg, 60m logreg, 60m rf, 60m gbt) fail to exclude 0.5000, indicating that predictive power is fragile and decays toward chance as the lookahead horizon expands.
+1. **Statistical Significance**: 5 of 9 evaluated models have a 95% block-bootstrap AUC CI that strictly excludes 0.5000 (5m logreg, 5m rf, 5m gbt, 15m rf, 15m gbt), suggesting a weak but detectable signal on this dataset (e.g. 5m logreg: AUC 0.5225 [0.5057, 0.5420]). 4 of 9 (15m logreg, 60m logreg, 60m rf, 60m gbt) do not exclude 0.5000. These are narrow margins on a short, correlated 2-symbol sample; results must be confirmed on the full dataset. With multiple comparisons across 9 models, some exclusions may be spurious.
 
-2. **Cost Survival**: NO trading strategy survives exchange fees (5 bps per side / 10 bps round trip). While several strategies generate positive gross returns (e.g. 5m GBT +6.04% gross, 15m RF +5.04% gross), frequent trading causes fee drag to overwhelm gross alpha, driving net returns deeply negative across all models and margins (e.g. 5m GBT: -92.05% net, 15m RF: -55.75% net). Increasing the entry margin threshold (margin=0.05) reduces churn but remains net-negative (-6.76% to -55.19% net).
+2. **Cost Survival**: NO strategy survives exchange fees (5.0 bps per side / 10 bps round trip) across all 27 tested strategy/margin combinations. Best gross return: 6.04% (5m gbt margin=0.00); best net return: 0.00% (60m logreg margin=0.02); worst net return: -92.48% (5m rf margin=0.00). Buy-and-hold net returns over the same test window — 5m: -3.56%, 15m: -3.40%, 60m: -3.94% — are less negative than most model strategies at the zero-margin threshold, where model net returns and the random-signal baseline are indistinguishable.
 
-3. **Train-Majority vs. Oracle Baseline**: The train-majority baseline provides a deceptive benchmark whenever regime shift occurs between train and test distributions (e.g. at 15m where train majority accuracy was 0.4768 while oracle test majority was 0.5232). Evaluating against the test oracle majority reveals that models barely track or slightly underperform the test set's base rate.
+3. **Train-Majority vs. Oracle Baseline**: The train-majority baseline provides a deceptive benchmark whenever regime shift occurs between train and test distributions. Largest observed shift: at 15m, train majority accuracy was 0.4768 while oracle test majority was 0.5232. Evaluating against the test oracle majority reveals that models barely track or slightly underperform the test set's base rate.
 
 
 ## 10. Known Limitations and Scale-Up Notes

@@ -853,42 +853,116 @@ def generate_markdown_report(
 
     # Conclusions
     md.append("## 9. Plain-English Conclusions Derived from Empirical Data\n")
+    n_total_models = len(evaluation_summary)
     sig_models = [f"{r['horizon']}m {r['model_name']}" for r in evaluation_summary if r["auc_excludes_0_5"]]
     insig_models = [f"{r['horizon']}m {r['model_name']}" for r in evaluation_summary if not r["auc_excludes_0_5"]]
     net_positive_strategies = [bt for bt in backtest_results if bt["net_total_return"] > 0]
 
+    # --- Statistical significance paragraph ----------------------------------
     if sig_models:
+        # Pick the first sig model to use as an inline AUC example
+        _ex = next(r for r in evaluation_summary if r["auc_excludes_0_5"])
+        _ex_tag = f"{_ex['horizon']}m {_ex['model_name']}"
+        _ex_auc = f"{_ex['roc_auc']:.4f} [{_ex['auc_ci'][0]:.4f}, {_ex['auc_ci'][1]:.4f}]"
+        _insig_clause = (
+            f" {len(insig_models)} of {n_total_models} ({', '.join(insig_models)}) do not exclude 0.5000."
+            if insig_models else ""
+        )
         sig_desc = (
-            f"At shorter horizons, select models ({', '.join(sig_models)}) demonstrate weak but statistically "
-            "significant predictive signal where the 95% block-bootstrap AUC CI strictly excludes 0.5000 (e.g., 5m RF: 0.5335 [0.5173, 0.5498]). "
-            f"However, at the 60m horizon, all models ({', '.join(insig_models)}) fail to exclude 0.5000, indicating that predictive power "
-            "is fragile and decays toward chance as the lookahead horizon expands."
+            f"{len(sig_models)} of {n_total_models} evaluated models have a 95% block-bootstrap AUC CI that strictly "
+            f"excludes 0.5000 ({', '.join(sig_models)}), suggesting a weak but detectable signal on this dataset "
+            f"(e.g. {_ex_tag}: AUC {_ex_auc}).{_insig_clause} "
+            "These are narrow margins on a short, correlated 2-symbol sample; results must be confirmed on the full dataset. "
+            "With multiple comparisons across {n_total_models} models, some exclusions may be spurious.".format(
+                n_total_models=n_total_models
+            )
         )
     else:
         sig_desc = (
-            "NONE of the evaluated models produce an empirical 95% block-bootstrap AUC confidence interval that excludes 0.5000. "
-            "The predictions are statistically indistinguishable from chance at the 95% confidence level."
+            f"NONE of the {n_total_models} evaluated models produce an empirical 95% block-bootstrap AUC confidence "
+            "interval that excludes 0.5000. The predictions are statistically indistinguishable from chance at the "
+            "95% confidence level on this dataset."
         )
 
+    # --- Cost survival paragraph ---------------------------------------------
     if net_positive_strategies:
-        cost_desc = f"{len(net_positive_strategies)} strategies achieved positive net return after fees."
-    else:
+        _best = max(net_positive_strategies, key=lambda bt: bt["net_total_return"])
+        _worst_net = min(backtest_results, key=lambda bt: bt["net_total_return"])
+        _best_label = (
+            f"{_best['horizon_min']}m {_best['model_name']} margin={_best['margin']:.2f}"
+        )
+        _worst_label = (
+            f"{_worst_net['horizon_min']}m {_worst_net['model_name']} margin={_worst_net['margin']:.2f}"
+        )
         cost_desc = (
-            "NO trading strategy survives exchange fees (5 bps per side / 10 bps round trip). "
-            "While several strategies generate positive gross returns (e.g. 5m GBT +6.04% gross, 15m RF +5.04% gross), "
-            "frequent trading causes fee drag to overwhelm gross alpha, driving net returns deeply negative across all models "
-            "and margins (e.g. 5m GBT: -92.05% net, 15m RF: -55.75% net). Increasing the entry margin threshold (margin=0.05) "
-            "reduces churn but remains net-negative (-6.76% to -55.19% net)."
+            f"{len(net_positive_strategies)} of {len(backtest_results)} tested strategy/margin combinations "
+            f"achieved a positive net return after fees ({fee_bps:.1f} bps per side / {fee_bps*2:.0f} bps round trip). "
+            f"Best net return: {_best['net_total_return']*100:.2f}% "
+            f"({_best_label}). "
+            f"Worst net return: {_worst_net['net_total_return']*100:.2f}% ({_worst_label})."
+        )
+    else:
+        _worst_net = min(backtest_results, key=lambda bt: bt["net_total_return"])
+        _best_net = max(backtest_results, key=lambda bt: bt["net_total_return"])
+        _best_gross = max(backtest_results, key=lambda bt: bt["gross_total_return"])
+        _worst_label = (
+            f"{_worst_net['horizon_min']}m {_worst_net['model_name']} margin={_worst_net['margin']:.2f}"
+        )
+        _best_net_label = (
+            f"{_best_net['horizon_min']}m {_best_net['model_name']} margin={_best_net['margin']:.2f}"
+        )
+        _best_gross_label = (
+            f"{_best_gross['horizon_min']}m {_best_gross['model_name']} margin={_best_gross['margin']:.2f}"
+        )
+        # Per-horizon B&H summary (deduplicate by horizon)
+        seen_horizons: set = set()
+        bnh_parts = []
+        for bt in sorted(backtest_results, key=lambda x: x["horizon_min"]):
+            h_key = bt["horizon_min"]
+            if h_key not in seen_horizons:
+                bnh_parts.append(f"{h_key}m: {bt['buy_and_hold_net']*100:.2f}%")
+                seen_horizons.add(h_key)
+        bnh_summary = ", ".join(bnh_parts)
+        cost_desc = (
+            f"NO strategy survives exchange fees ({fee_bps:.1f} bps per side / {fee_bps*2:.0f} bps round trip) "
+            f"across all {len(backtest_results)} tested strategy/margin combinations. "
+            f"Best gross return: {_best_gross['gross_total_return']*100:.2f}% ({_best_gross_label}); "
+            f"best net return: {_best_net['net_total_return']*100:.2f}% ({_best_net_label}); "
+            f"worst net return: {_worst_net['net_total_return']*100:.2f}% ({_worst_label}). "
+            f"Buy-and-hold net returns over the same test window — {bnh_summary} — "
+            "are less negative than most model strategies at the zero-margin threshold, "
+            "where model net returns and the random-signal baseline are indistinguishable."
+        )
+
+    # --- Train-majority vs oracle paragraph ----------------------------------
+    # Summarise the most extreme train-vs-oracle shift observed in the data
+    _shifts = [
+        (abs(r["oracle_majority_acc"] - r["train_majority_acc"]), r)
+        for r in evaluation_summary
+    ]
+    _shifts.sort(key=lambda x: x[0], reverse=True)
+    _worst_shift_r = _shifts[0][1] if _shifts else None
+    if _worst_shift_r is not None:
+        _train_acc_str = f"{_worst_shift_r['train_majority_acc']:.4f}"
+        _oracle_acc_str = f"{_worst_shift_r['oracle_majority_acc']:.4f}"
+        _shift_horizon = f"{_worst_shift_r['horizon']}m"
+        baseline_desc = (
+            "The train-majority baseline provides a deceptive benchmark whenever regime shift occurs between "
+            "train and test distributions. Largest observed shift: "
+            f"at {_shift_horizon}, train majority accuracy was {_train_acc_str} "
+            f"while oracle test majority was {_oracle_acc_str}. "
+            "Evaluating against the test oracle majority reveals that models barely track or slightly underperform "
+            "the test set's base rate."
+        )
+    else:
+        baseline_desc = (
+            "The train-majority baseline provides a deceptive benchmark whenever regime shift occurs. "
+            "Evaluating against the test oracle majority reveals that models barely track the test set's base rate."
         )
 
     md.append(f"1. **Statistical Significance**: {sig_desc}\n")
     md.append(f"2. **Cost Survival**: {cost_desc}\n")
-    md.append(
-        "3. **Train-Majority vs. Oracle Baseline**: The train-majority baseline provides a deceptive benchmark whenever "
-        "regime shift occurs between train and test distributions (e.g. at 15m where train majority accuracy was 0.4768 "
-        "while oracle test majority was 0.5232). Evaluating against the test oracle majority reveals that models barely track "
-        "or slightly underperform the test set's base rate.\n\n"
-    )
+    md.append(f"3. **Train-Majority vs. Oracle Baseline**: {baseline_desc}\n\n")
 
     # Known limitations and scale-up notes
     md.append("## 10. Known Limitations and Scale-Up Notes\n")

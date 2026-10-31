@@ -37,6 +37,7 @@ from spark.apps.ml.evaluate import (
     compute_oracle_majority,
     compute_pr_auc,
     compute_roc_auc,
+    generate_markdown_report,
     run_backtest_strategy,
     select_non_overlapping_bars,
 )
@@ -270,4 +271,180 @@ class TestCalibrationProperties:
         total_counted = sum(b["count"] for b in cal_table)
         assert total_counted == n
         assert ece >= 0.0
+
+
+class TestConclusionsGeneration:
+    """Verify generate_markdown_report builds data-driven conclusions (no hard-coded sample literals)."""
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_eval_row(
+        horizon: int,
+        model_name: str,
+        auc_excludes: bool,
+        roc_auc: float = 0.52,
+        train_maj: float = 0.50,
+        oracle_maj: float = 0.51,
+    ) -> dict:
+        """Build a minimal evaluation_summary row."""
+        lo = 0.51 if auc_excludes else 0.49
+        hi = 0.53
+        return {
+            "horizon": horizon,
+            "model_name": model_name,
+            "roc_auc": roc_auc,
+            "auc_ci": (lo, hi),
+            "auc_excludes_0_5": auc_excludes,
+            "pr_auc": 0.50,
+            "accuracy": 0.51,
+            "acc_ci": (0.49, 0.53),
+            "train_majority_acc": train_maj,
+            "oracle_majority_acc": oracle_maj,
+            "f1": 0.50,
+            "log_loss": 0.693,
+            "brier_score": 0.25,
+        }
+
+    @staticmethod
+    def _make_bt_row(
+        horizon: int,
+        model_name: str,
+        margin: float,
+        net_total_return: float,
+        gross_total_return: float = 0.02,
+        bnh_net: float = -0.03,
+    ) -> dict:
+        """Build a minimal backtest result row."""
+        return {
+            "horizon_min": horizon,
+            "model_name": model_name,
+            "margin": margin,
+            "fee_bps_per_side": 5.0,
+            "round_trip_fee": 0.0010,
+            "total_evaluated_bars": 100,
+            "n_trades": 50,
+            "hit_rate_gross": 0.52,
+            "hit_rate_net": 0.14,
+            "mean_gross_return": 0.0002,
+            "mean_net_return": net_total_return / 50,
+            "gross_total_return": gross_total_return,
+            "net_total_return": net_total_return,
+            "buy_and_hold_gross": -0.02,
+            "buy_and_hold_net": bnh_net,
+            "random_baseline_mean_gross": 0.0,
+            "random_baseline_mean_net": -0.005,
+        }
+
+    @staticmethod
+    def _run_report(eval_summary: list, bt_results: list, tmp_path: str) -> str:
+        """Invoke generate_markdown_report with minimal stubs and return the text."""
+        # Stub: no symbol breakdown, stability, calibration, features, or logreg diag
+        report = generate_markdown_report(
+            evaluation_summary=eval_summary,
+            symbol_breakdown={},
+            stability_breakdown={},
+            calibration_results={},
+            backtest_results=bt_results,
+            logreg_60m_diag={"found": False, "notes": ""},
+            top_features={},
+            block_minutes=60,
+            fee_bps=5.0,
+            output_path=tmp_path,
+        )
+        return report
+
+    # ------------------------------------------------------------------
+    # Test 1: one model CI includes 0.5, one IS net-positive after fees
+    # ------------------------------------------------------------------
+
+    def test_one_net_positive_one_ci_includes_05(self, tmp_path: "pytest.TempPathFactory") -> None:
+        """
+        Fixture: model A excludes 0.5 (5m logreg), model B includes 0.5 (15m rf).
+        Strategy C is net-positive; all others are net-negative.
+        Assertions:
+          - Conclusions mention the specific CI-excluding model (5m logreg).
+          - Conclusions mention the 15m rf model does NOT exclude 0.5.
+          - Conclusions report a net-positive strategy count of 1.
+          - No hard-coded sample-specific literals present.
+        """
+        out_path = str(tmp_path / "report.md")
+
+        eval_summary = [
+            self._make_eval_row(5, "logreg", auc_excludes=True, roc_auc=0.53,
+                                train_maj=0.50, oracle_maj=0.51),
+            self._make_eval_row(15, "rf", auc_excludes=False, roc_auc=0.505,
+                                train_maj=0.48, oracle_maj=0.52),
+        ]
+
+        bt_results = [
+            # net-positive strategy
+            self._make_bt_row(5, "logreg", margin=0.05, net_total_return=0.03,
+                              bnh_net=-0.035),
+            # net-negative strategy
+            self._make_bt_row(15, "rf", margin=0.0, net_total_return=-0.55,
+                              bnh_net=-0.034),
+        ]
+
+        report = self._run_report(eval_summary, bt_results, out_path)
+
+        # The CI-excluding model must be named
+        assert "5m logreg" in report, "CI-excluding model must appear in conclusions"
+
+        # The CI-including model must also be mentioned
+        assert "15m rf" in report, "CI-including model must appear in conclusions"
+
+        # Net-positive count must be stated as '1'
+        assert "1 of 2" in report, "Net-positive strategy count must be computed from data"
+
+        # The best net return must appear (0.03 → 3.00%)
+        assert "3.00%" in report, "Best net return must appear verbatim in conclusions"
+
+        # Hard-coded sample literals must NOT appear
+        _forbidden = [
+            "-92.05%", "-55.75%", "-6.76%", "-55.19%",
+            "5m GBT +6.04%", "15m RF +5.04%",
+            "0.4768", "0.5232",
+        ]
+        for literal in _forbidden:
+            assert literal not in report, (
+                f"Hard-coded sample literal '{literal}' must not appear in generated report"
+            )
+
+    # ------------------------------------------------------------------
+    # Test 2: all CIs include 0.5, no strategy is net-positive
+    # ------------------------------------------------------------------
+
+    def test_all_ci_include_05_no_net_positive(self, tmp_path: "pytest.TempPathFactory") -> None:
+        """
+        Fixture: both models' CIs include 0.5. No strategy is net-positive.
+        Conclusions must report NONE for both cases.
+        """
+        out_path = str(tmp_path / "report2.md")
+
+        eval_summary = [
+            self._make_eval_row(5, "rf", auc_excludes=False, train_maj=0.51, oracle_maj=0.51),
+            self._make_eval_row(60, "gbt", auc_excludes=False, train_maj=0.49, oracle_maj=0.51),
+        ]
+        bt_results = [
+            self._make_bt_row(5, "rf", margin=0.0, net_total_return=-0.50,
+                              bnh_net=-0.036),
+            self._make_bt_row(60, "gbt", margin=0.0, net_total_return=-0.15,
+                              bnh_net=-0.039),
+        ]
+
+        report = self._run_report(eval_summary, bt_results, out_path)
+
+        # Must explicitly say NONE for CI
+        assert "NONE" in report, "All-CI-includes-0.5 case must state NONE"
+
+        # Must say NO strategy
+        assert "NO strategy" in report, "All-net-negative case must state NO strategy"
+
+        # Must not claim any specific model's CI excludes 0.5
+        assert "strictly excludes 0.5000" not in report, (
+            "Must not claim CI exclusion when none exist"
+        )
 
