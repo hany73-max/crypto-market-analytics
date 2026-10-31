@@ -187,8 +187,8 @@ The evaluation is model-agnostic: `evaluate.py` reads only `test_predictions.par
 - At 5m, all three models and at 15m two of three (rf, gbt) have 95% CIs that exclude 0.5 on this test window. The absolute AUC margins are small (0.52–0.53). Whether this persists on the full dataset is unknown.
 - At 60m, no model's CI excludes 0.5. Signal appears to decay to chance at this horizon on the sample data.
 - **Time-slice stability**: 4-quartile AUC standard deviations range from 0.008 (5m gbt) to 0.073 (60m rf). The 15m logistic regression shows high quartile-to-quartile variance (std = 0.048), indicating unstable signal across the test window.
-- Buy-and-hold over the ~4.5-day test window lost approximately **−3.56% (5m/15m test window)** and **−3.94% (60m test window)**.
-- **No backtest is net-positive after fees** (5.0 bps per side / 10 bps round-trip). Gross returns for several configurations are modestly positive (e.g. 5m GBT: +6.04% gross), but fee drag drives all net returns deeply negative across all 27 tested combinations (margin ∈ {0.00, 0.02, 0.05}).
+- Buy-and-hold (net, after one entry and one exit fee of 5 bps each) lost **−3.56%** in the 5m test window, **−3.40%** in the 15m test window, and **−3.94%** in the 60m test window (B&H Net Ret column in the report).
+- **No backtest is net-positive after fees** (5.0 bps per side / 10 bps round-trip). Gross returns for several configurations are modestly positive (e.g. 5m GBT: +6.04% gross, 5m logreg: +2.33% gross, 15m RF: +5.04% gross), but the gross edge per trade is tiny — at 5m (margin=0.00) mean net return per trade is approximately −9.8 to −10.0 bps against the 10 bps round-trip cost, implying a mean gross edge of roughly +0.1 to +0.2 bps per trade, about 50× too small to cover costs. Fee drag drives all net returns deeply negative across all 27 tested combinations (margin ∈ {0.00, 0.02, 0.05}). At margin=0.00, the models' net total returns at 5m (−92.05% to −92.48%) are indistinguishable from the random-signal baseline (−92.50%).
 
 ### 6.3 Degenerate 60m logistic regression
 
@@ -257,6 +257,8 @@ data/models/
 
 ### 8.1 Environment setup
 
+> **Windows:** all commands below use `.\.venv\Scripts\python.exe` to invoke the venv Python directly. Activate the venv first (`.\venv\Scripts\Activate.ps1`) or prefix every `python` call with `.\.venv\Scripts\python.exe`.
+
 ```powershell
 # Python 3.10 required (matches PySpark 3.3.0 runtime)
 python -m venv .venv
@@ -267,13 +269,13 @@ pip install -r requirements-ml.txt
 ### 8.2 Fetch sample data (requires network; Binance public API)
 
 ```powershell
-python scripts/fetch_sample_data.py --symbols BTCUSDT,ETHUSDT --days 30 --output data/sample_klines.parquet
+.\.venv\Scripts\python.exe scripts/fetch_sample_data.py --symbols BTCUSDT,ETHUSDT --days 30 --output data/sample_klines.parquet
 ```
 
 ### 8.3 Run tests
 
 ```powershell
-python -m pytest tests/ml/ -v
+.\.venv\Scripts\python.exe -m pytest tests/ml/ -v
 ```
 
 Tests cover label correctness (gap safety, symbol boundaries, epsilon mode), feature null propagation, chronological split integrity, pipeline assembly, training smoke tests, and evaluation metric implementations. They use a `local[2]` Spark session and do not require Docker.
@@ -281,7 +283,7 @@ Tests cover label correctness (gap safety, symbol boundaries, epsilon mode), fea
 ### 8.4 Training
 
 ```powershell
-python -m spark.apps.ml.train --input data/sample_klines.parquet --horizons 5,15,60 --models logreg,rf,gbt --output-dir data/models
+.\.venv\Scripts\python.exe -m spark.apps.ml.train --input data/sample_klines.parquet --horizons 5,15,60 --models logreg,rf,gbt --output-dir data/models
 ```
 
 Key CLI flags:
@@ -290,13 +292,14 @@ Key CLI flags:
 - `--quick` — single hyperparameter point per model (faster iteration)
 - `--conservative-purge` — use `max(horizons)` embargo for all splits
 - `--exclude-features` — comma-separated feature names to ablate
+- `--sample-fraction` — deterministic downsampling fraction in (0, 1] for quick iteration
 
 **Resource note:** Training on the sample dataset (2 symbols × 30 days) runs in `local[*]` with default driver memory. Training on the full dataset (≈30 symbols × 1 year) will exceed the **3 GB Docker Spark worker** constraint — run locally with at least 8–16 GB driver memory allocated, not inside the Docker compose stack.
 
 ### 8.5 Evaluation
 
 ```powershell
-python -m spark.apps.ml.evaluate --models-dir data/models --horizons 5,15,60 --models logreg,rf,gbt --output docs/ml_evaluation_report.md
+.\.venv\Scripts\python.exe -m spark.apps.ml.evaluate --models-dir data/models --horizons 5,15,60 --fee-bps 5 --margin 0.0,0.02,0.05 --block-minutes 60 --n-boot 500 --seed 42 --output docs/ml_evaluation_report.md
 ```
 
 This reads only Parquet prediction files and JSON metadata; it does not reload or retrain models.
@@ -338,3 +341,4 @@ The following items are planned or agreed with the teammate:
 | Expanded hyperparameter grids (especially 60m logreg) | ML layer |
 | Deep-learning baseline (e.g. LSTM or Transformer) | Optional — pluggable through the same `prediction_schema_version: "1.0.0"` contract |
 | Order-book / trade-flow features from live WebSocket streams | Optional — producer streams required |
+
