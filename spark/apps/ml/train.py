@@ -39,9 +39,10 @@ from pyspark.ml.evaluation import (
     BinaryClassificationEvaluator,
     MulticlassClassificationEvaluator,
 )
+from pyspark.ml.functions import vector_to_array
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import DoubleType, LongType, StringType
+from pyspark.sql.types import DoubleType, IntegerType, LongType, StringType, TimestampType
 
 # Ensure repo root is available
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -426,6 +427,7 @@ def save_model_artifacts(
     fitted_pipeline.write().overwrite().save(pipe_path)
 
     # 2. Metadata JSON
+    metadata["prediction_schema_version"] = metadata.get("prediction_schema_version", "1.0.0")
     meta_path = os.path.join(model_dir, "metadata.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, indent=2)
@@ -435,15 +437,79 @@ def save_model_artifacts(
     with open(feat_path, "w", encoding="utf-8") as f:
         json.dump(feature_weights, f, indent=2)
 
-    # 4. Test Predictions Parquet
+    # 4. Test Predictions Parquet (model-agnostic common schema)
     pred_path = os.path.join(model_dir, "test_predictions.parquet")
     save_preds_df = test_predictions
+
+    # Symbol
     if "symbol" not in save_preds_df.columns:
         save_preds_df = save_preds_df.withColumn("symbol", F.lit("UNKNOWN").cast(StringType()))
+    else:
+        save_preds_df = save_preds_df.withColumn("symbol", F.col("symbol").cast(StringType()))
+
+    # open_time (epoch ms)
     if "open_time" not in save_preds_df.columns:
         save_preds_df = save_preds_df.withColumn("open_time", F.lit(0).cast(LongType()))
+    else:
+        save_preds_df = save_preds_df.withColumn("open_time", F.col("open_time").cast(LongType()))
 
-    pred_cols = ["symbol", "open_time", "label", "prediction", "probability"]
+    # open_time_dt
+    if "open_time_dt" in save_preds_df.columns:
+        save_preds_df = save_preds_df.withColumn("open_time_dt", F.col("open_time_dt").cast(TimestampType()))
+    else:
+        save_preds_df = save_preds_df.withColumn("open_time_dt", (F.col("open_time") / 1000).cast(TimestampType()))
+
+    # horizon_min
+    save_preds_df = save_preds_df.withColumn("horizon_min", F.lit(int(horizon)).cast(IntegerType()))
+
+    # model_name
+    save_preds_df = save_preds_df.withColumn("model_name", F.lit(str(model_name)).cast(StringType()))
+
+    # label (0/1)
+    save_preds_df = save_preds_df.withColumn("label", F.col("label").cast(IntegerType()))
+
+    # prediction (0/1)
+    save_preds_df = save_preds_df.withColumn("prediction", F.col("prediction").cast(IntegerType()))
+
+    # p_up (probability of class 1, extracted from vector)
+    if "p_up" in save_preds_df.columns:
+        save_preds_df = save_preds_df.withColumn("p_up", F.col("p_up").cast(DoubleType()))
+    elif "probability" in save_preds_df.columns:
+        save_preds_df = save_preds_df.withColumn("p_up", vector_to_array(F.col("probability"))[1].cast(DoubleType()))
+    else:
+        save_preds_df = save_preds_df.withColumn("p_up", F.col("prediction").cast(DoubleType()))
+
+    # current_close
+    if "current_close" in save_preds_df.columns:
+        save_preds_df = save_preds_df.withColumn("current_close", F.col("current_close").cast(DoubleType()))
+    elif "close" in save_preds_df.columns:
+        save_preds_df = save_preds_df.withColumn("current_close", F.col("close").cast(DoubleType()))
+    else:
+        save_preds_df = save_preds_df.withColumn("current_close", F.lit(0.0).cast(DoubleType()))
+
+    # future_return (realized future_return_{h}m, NOT NULL for scored rows)
+    fut_col = f"future_return_{horizon}m"
+    if fut_col in save_preds_df.columns:
+        save_preds_df = save_preds_df.withColumn("future_return", F.col(fut_col).cast(DoubleType()))
+    elif "future_return" in save_preds_df.columns:
+        save_preds_df = save_preds_df.withColumn("future_return", F.col("future_return").cast(DoubleType()))
+    else:
+        save_preds_df = save_preds_df.withColumn("future_return", F.lit(0.0).cast(DoubleType()))
+
+    save_preds_df = save_preds_df.filter(F.col("future_return").isNotNull())
+
+    pred_cols = [
+        "symbol",
+        "open_time",
+        "open_time_dt",
+        "horizon_min",
+        "model_name",
+        "label",
+        "prediction",
+        "p_up",
+        "current_close",
+        "future_return",
+    ]
     save_preds_df.select(*pred_cols).write.mode("overwrite").parquet(pred_path)
 
     logger.info("Artifacts successfully saved to: %s", model_dir)
@@ -624,6 +690,7 @@ def run_training_job(
 
             # Metadata creation
             metadata = {
+                "prediction_schema_version": "1.0.0",
                 "feature_list": list(active_features),
                 "horizon": int(h),
                 "model_name": m_name,

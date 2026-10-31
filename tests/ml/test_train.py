@@ -260,13 +260,17 @@ class TestTrainPipeline:
             t = base_time + (i * MS_PER_MINUTE)
             f1 = float(i * 0.1)
             lbl = float(i % 2)
-            rows.append((t, "BTCUSDT", f1, lbl))
+            close = 50000.0 + i
+            fut_ret = 0.002 * (1.0 if lbl == 1.0 else -1.0)
+            rows.append((t, "BTCUSDT", f1, close, fut_ret, lbl))
 
         schema = StructType(
             [
                 StructField("open_time", LongType(), False),
                 StructField("symbol", StringType(), False),
                 StructField("f1", DoubleType(), False),
+                StructField("close", DoubleType(), False),
+                StructField("future_return_5m", DoubleType(), False),
                 StructField("label", DoubleType(), False),
             ]
         )
@@ -331,6 +335,7 @@ class TestTrainPipeline:
             loaded_meta = json.load(f)
 
         required_keys = [
+            "prediction_schema_version",
             "feature_list",
             "horizon",
             "model_name",
@@ -344,12 +349,25 @@ class TestTrainPipeline:
         ]
         for k in required_keys:
             assert k in loaded_meta, f"Missing required metadata key: {k}"
+        assert loaded_meta["prediction_schema_version"] == "1.0.0"
 
         # 2. Check test_predictions.parquet
         pred_file = os.path.join(saved_path, "test_predictions.parquet")
         assert os.path.exists(pred_file)
         pred_df = spark.read.parquet(pred_file)
-        assert set(["symbol", "open_time", "label", "prediction", "probability"]).issubset(pred_df.columns)
+        expected_cols = [
+            "symbol",
+            "open_time",
+            "open_time_dt",
+            "horizon_min",
+            "model_name",
+            "label",
+            "prediction",
+            "p_up",
+            "current_close",
+            "future_return",
+        ]
+        assert pred_df.columns == expected_cols
         assert pred_df.count() == test_df.count()
 
         # 3. Reload PipelineModel and verify predictions match exactly
@@ -360,6 +378,102 @@ class TestTrainPipeline:
         orig_preds_list = [r["prediction"] for r in res["test_predictions"].select("prediction").collect()]
         reloaded_preds_list = [r["prediction"] for r in reloaded_preds.select("prediction").collect()]
         assert orig_preds_list == reloaded_preds_list
+
+    def test_prediction_schema_contract_and_p_up_range(self, spark: SparkSession, tmp_path) -> None:
+        """
+        Verify the saved test-prediction Parquet matches the common model-agnostic schema exactly:
+          1. Columns: symbol, open_time, open_time_dt, horizon_min, model_name, label, prediction,
+             p_up, current_close, future_return.
+          2. No Vector columns exist in the output.
+          3. p_up is bounded in [0.0, 1.0].
+          4. future_return is strictly NOT NULL for scored rows.
+        """
+        base_time = 1_700_000_000_000
+        rows = []
+        for i in range(120):
+            t = base_time + (i * MS_PER_MINUTE)
+            f1 = float(i % 5)
+            lbl = float(i % 2)
+            close = 60000.0 + (i * 10)
+            fut_ret = 0.0015 * (1.0 if lbl == 1.0 else -1.0)
+            rows.append((t, "ETHUSDT", f1, close, fut_ret, lbl))
+
+        schema = StructType(
+            [
+                StructField("open_time", LongType(), False),
+                StructField("symbol", StringType(), False),
+                StructField("f1", DoubleType(), False),
+                StructField("close", DoubleType(), False),
+                StructField("future_return_15m", DoubleType(), False),
+                StructField("label", DoubleType(), False),
+            ]
+        )
+        df = spark.createDataFrame(rows, schema=schema)
+        train_df, val_df, test_df, split_info = split_time_series(df=df, horizon_minutes=15, label_col="label")
+
+        weights = compute_balanced_weights(train_df)
+        train_df = add_sample_weights(train_df, weights)
+        val_df = add_sample_weights(val_df, weights)
+        test_df = add_sample_weights(test_df, weights)
+
+        res = train_model(
+            train_df=train_df,
+            val_df=val_df,
+            test_df=test_df,
+            model_name="rf",
+            feature_cols=["f1"],
+            param_grid=[{"numTrees": 5, "maxDepth": 3}],
+            seed=42,
+        )
+
+        out_dir = str(tmp_path / "schema_check")
+        saved_path = save_model_artifacts(
+            output_dir=out_dir,
+            horizon=15,
+            model_name="rf",
+            fitted_pipeline=res["fitted_pipeline"],
+            test_predictions=res["test_predictions"],
+            metadata={
+                "prediction_schema_version": "1.0.0",
+                "feature_list": ["f1"],
+                "horizon": 15,
+                "model_name": "rf",
+            },
+            feature_weights=res["feature_importance"],
+        )
+
+        pred_file = os.path.join(saved_path, "test_predictions.parquet")
+        assert os.path.exists(pred_file)
+        pred_df = spark.read.parquet(pred_file)
+
+        # 1. Exact columns match
+        expected_cols = [
+            "symbol",
+            "open_time",
+            "open_time_dt",
+            "horizon_min",
+            "model_name",
+            "label",
+            "prediction",
+            "p_up",
+            "current_close",
+            "future_return",
+        ]
+        assert pred_df.columns == expected_cols
+
+        # 2. No vector columns
+        for field in pred_df.schema.fields:
+            type_str = field.dataType.simpleString()
+            assert "vector" not in type_str.lower(), f"Vector column detected in output: {field.name}"
+
+        # 3. p_up in [0.0, 1.0]
+        p_up_stats = pred_df.select(F.min("p_up").alias("min_p"), F.max("p_up").alias("max_p")).collect()[0]
+        assert p_up_stats["min_p"] >= 0.0, f"p_up min is below 0: {p_up_stats['min_p']}"
+        assert p_up_stats["max_p"] <= 1.0, f"p_up max is above 1: {p_up_stats['max_p']}"
+
+        # 4. future_return is strictly NOT NULL
+        null_returns = pred_df.filter(F.col("future_return").isNull()).count()
+        assert null_returns == 0, f"Found {null_returns} null future_return rows in scored predictions"
 
     def test_tree_models_fast_execution(self, spark: SparkSession) -> None:
         """Verify RandomForest and GBT models train cleanly without failure."""
